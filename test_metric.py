@@ -112,9 +112,9 @@ class TestMeanIoUMetric(unittest.TestCase):
     def test_20_classes_with_tensor_input_cpu(self):
         self._test_20_classes_with_tensor_input(20, 'cpu', torch.int64)
 
-    def test_20_classes_with_tensor_input_gpu(self):
+    def test_20_classes_with_tensor_input_cuda(self):
         if torch.cuda.is_available():
-            self._test_20_classes_with_tensor_input(20, 'gpu', torch.int64)
+            self._test_20_classes_with_tensor_input(20, 'cuda', torch.int64)
 
     def test_20_classes_with_tensor_input_uint8(self):
         self._test_20_classes_with_tensor_input(20, 'cpu', torch.uint8)
