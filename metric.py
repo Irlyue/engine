@@ -1,9 +1,33 @@
 import torch
 import numpy as np
-import torch.nn as nn
+
+
+def tensor_to_np_array(*arrays):
+    return [array.cpu().numpy() if isinstance(array, torch.Tensor) else array for array in arrays]
 
 
 class Metric:
+    """
+    All the metric results are stored in the numpy array since it's more
+    general and the testing shouldn't cost much computation power so CPU
+    is far from enough.
+
+    Usage
+    -----
+    1. Use as context manager
+    >>> data = [(0, 0)]
+    >>> with Metric() as metric:
+    ...     for batch_gt, batch_pred in data:
+    ...         metric(batch_gt, batch_pred)
+    ...
+    >>> print(metric.result)
+
+    2. Use separately. You could call reset() to clear out the history data.
+    >>> metric = Metric()
+    >>> metric(batch_gt, batch_pred)
+    >>> metric.reset() # will remove the historical data
+    >>> print(metric.result)
+    """
     def __init__(self, name):
         self.name = name
 
@@ -37,33 +61,13 @@ class AccuracyMetric(Metric):
 
     def __call__(self, gt, pred):
         gt, pred = (gt, pred) if self.func is None else self.func(gt, pred)
-        self.correct += gt.eq(pred).sum().item()
-        self.total += gt.numel()
+        gt, pred = tensor_to_np_array(gt, pred)
+        self.correct += np.sum(gt == pred)
+        self.total += gt.size
 
     @property
     def result(self):
         return self.correct / self.total
-
-
-class CrossEntropyLossMetric(Metric):
-    def __init__(self, func=None):
-        super().__init__('CELoss')
-        self.func = func
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index=255)
-        self.reset()
-
-    def reset(self):
-        self.total_loss = 0.0
-        self.count = 0
-
-    def __call__(self, gt, pred):
-        gt, pred = (gt, pred) if self.func is None else self.func(gt, pred)
-        self.total_loss += self.loss_fn(pred, gt)
-        self.count += 1
-
-    @property
-    def result(self):
-        return self.total_loss / self.count
 
 
 class MeanIoUMetric(Metric):
@@ -79,13 +83,10 @@ class MeanIoUMetric(Metric):
 
     def __call__(self, gt, pred):
         gt, pred = (gt, pred) if self.func is None else self.func(gt, pred)
+        gt, pred = tensor_to_np_array(gt, pred)
         self.cm += self._confusion_matrix(gt, pred)
 
     def _confusion_matrix(self, gt, pred):
-        if isinstance(gt, torch.Tensor):
-            gt = gt.cpu().numpy()
-        if isinstance(pred, torch.Tensor):
-            pred = pred.cpu().numpy()
         gt, pred = [item.astype(np.int64) for item in [gt, pred]]
         flag = (gt != self.ignore_pixel)
         counts = gt[flag] + pred[flag] * self.n_classes
