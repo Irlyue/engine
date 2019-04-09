@@ -1,4 +1,5 @@
 import os
+import log
 import json
 import torch
 import torch.nn as nn
@@ -8,16 +9,28 @@ from tqdm import tqdm
 
 class Engine:
     SAVE_PATH = 'model.pt'
+    TRAIN_LOG_FILE = 'train_log.txt'
+    EVAL_LOG_FILE = 'eval_log.txt'
 
     def __init__(self, model, config):
         self.model = model
         self.config = config
         self.multi_gpu_model = None
+        self.log = None
 
     def __call__(self, x):
         return self.model(x)
 
     def train(self, data, optimizer, loss_fn, hooks=None, progress_bar=True):
+        """
+        :param data: iterator, gives the training batch (input, label)
+        :param optimizer: torch.optim.optimizer,
+        :param loss_fn: callable, loss function for training. Must return a scalar. It will
+        be used as
+                    loss = loss_fn(model(input), label)
+        :param hooks: list,
+        :param progress_bar: bool, set it to False to disable progress bar.
+        """
         config = self.config
         self.on_start_train(hooks=hooks, optimizer=optimizer)
         for self.st['epoch'] in range(self.st['epoch'], config['n_epochs'] + self.st['epoch']):
@@ -61,16 +74,17 @@ class Engine:
         }
         to_save.update(others)
         torch.save(to_save, path)
-        print('===>Model-%d saved at %s' % (to_save['step'], path))
+        self.log.print('===> Model-%d saved at %s' % (to_save['step'], path))
 
     def load_model(self, path):
         path = self.model_path(path)
         loaded = torch.load(path)
         self.model.load_state_dict(loaded.pop('state_dict'))
         self.st.update(loaded)
-        print('===>Model at %d step loaded!' % self.st['step'])
+        self.log.print('===> Model at %d step loaded!' % self.st['step'])
 
     def on_start_eval(self, **kwargs):
+        self.log = log.TerminalFileLogger(log_file=self.relative_path(self.EVAL_LOG_FILE))
         self.model.eval()
         self.model.to(self.config['device'])
         self.st = kwargs.copy()
@@ -81,12 +95,14 @@ class Engine:
             hook.on_start_eval(self)
 
     def on_end_eval(self):
-        print('***********************************')
+        self.log.print('***********************************')
         for metric in self.st['metrics']:
-            print(metric)
-        print('***********************************')
+            self.log.print(metric)
+        self.log.print('***********************************')
+        self.log.close()
 
     def on_start_train(self, **kwargs):
+        self.log = log.TerminalFileLogger(log_file=self.relative_path(self.TRAIN_LOG_FILE))
         self.model.train()
         self.st = {
             'epoch': 0,
@@ -99,7 +115,7 @@ class Engine:
 
         n_gpus = torch.cuda.device_count()
         if self.config['multi_gpus'] and n_gpus > 1:
-            print('==> Using %d GPUs...' % n_gpus)
+            self.log.print('==> Using %d GPUs...' % n_gpus)
             self.multi_gpu_model = nn.DataParallel(self.model)
             self.multi_gpu_model.to(self.config['device'])
         else:
@@ -109,18 +125,21 @@ class Engine:
             self.load_model(self.SAVE_PATH)
         if not os.path.exists(self.config['model_dir']):
             os.makedirs(self.config['model_dir'])
-        with open(os.path.join(self.config['model_dir'], 'config.json'), 'wt') as f:
-            json.dump(self.config, f, indent=2)
+        self.log.print('\n%s\n' % json.dumps(self.config, indent=2))
         for hook in self.st['hooks'] or []:
             hook.on_start_train(self)
 
     def model_path(self, path):
         return path if os.path.isabs(path) else os.path.join(self.config['model_dir'], path)
 
+    def relative_path(self, path):
+        return path if os.path.isabs(path) else os.path.join(self.config['model_dir'], path)
+
     def on_end_train(self):
-        print('Loss at final step: %.4f' % self.st['loss'])
+        self.log.print('Loss at final step: %.4f' % self.st['loss'])
         for hook in self.st['hooks'] or []:
             hook.on_end_train(self)
+        self.log.close()
 
     def on_start_epoch(self):
         pass
@@ -169,11 +188,11 @@ class LoggingHook(Hook):
 
     def on_end_batch(self, engine):
         if self.print_every_steps and engine.st['step'] % self.print_every_steps == 0:
-            print(', '.join('{}={}'.format(key, engine.st[key]) for key in self.keys))
+            engine.log.print(', '.join('{}={}'.format(key, engine.st[key]) for key in self.keys))
 
     def on_end_epoch(self, engine):
         if self.print_every_epochs and engine.st['epoch'] % self.print_every_epochs == 0:
-            print(', '.join('{}={}'.format(key, engine.st[key]) for key in self.keys))
+            engine.log.print(', '.join('{}={}'.format(key, engine.st[key]) for key in self.keys))
 
 
 class SaveBestModelHook(Hook):
@@ -193,7 +212,7 @@ class SaveBestModelHook(Hook):
                 pred = engine.model(inputs)
                 metric(labels, pred)
         if self.best_acc < metric.result:
-            print('===>Aha, %s' % self.metric)
+            engine.log.print('===> Aha, %s' % self.metric)
             self.best_acc = metric.result
             engine.save_model(self.SAVE_PATH)
         engine.model.train()
@@ -230,7 +249,7 @@ class ApplyEMAHook(Hook):
         self.params = params
 
     def on_start_eval(self, engine):
-        print('==> Applying EMA weights')
+        engine.log.print('==> Applying EMA weights')
         state = torch.load(engine.model_path(self.save_path))
         with torch.no_grad():
             for left, right in zip(self.params or engine.model.parameters(), state['ema']):
