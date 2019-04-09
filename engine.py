@@ -179,31 +179,43 @@ class Hook:
         pass
 
 
-class LoggingHook(Hook):
-    def __init__(self, keys, print_every_steps=None, print_every_epochs=None):
-        assert not (print_every_steps and print_every_epochs), 'Provide only one of them!'
-        self.keys = keys
-        self.print_every_steps = print_every_steps
-        self.print_every_epochs = print_every_epochs
+class FrequencyHook(Hook):
+    def __init__(self, every_steps=None, every_epochs=None):
+        assert not (every_steps and every_epochs), 'Provide only one of them!'
+        self.every_steps = every_steps
+        self.every_epochs = every_epochs
+
+    def do_it(self, g):
+        raise NotImplementedError
 
     def on_end_batch(self, engine):
-        if self.print_every_steps and engine.st['step'] % self.print_every_steps == 0:
-            engine.log.print(', '.join('{}={}'.format(key, engine.st[key]) for key in self.keys))
+        if self.every_steps and engine.st['step'] % self.every_steps == 0:
+            self.do_it(engine)
 
     def on_end_epoch(self, engine):
-        if self.print_every_epochs and engine.st['epoch'] % self.print_every_epochs == 0:
-            engine.log.print(', '.join('{}={}'.format(key, engine.st[key]) for key in self.keys))
+        if self.every_epochs and engine.st['epoch'] % self.every_epochs == 0:
+            self.do_it(engine)
 
 
-class SaveBestModelHook(Hook):
+class LoggingHook(FrequencyHook):
+    def __init__(self, keys, print_every_steps=None, print_every_epochs=None):
+        super().__init__(print_every_steps, print_every_epochs)
+        self.keys = keys
+
+    def do_it(self, g):
+        g.log.print(', '.join('{}={}'.format(key, g.st[key]) for key in self.keys))
+
+
+class SaveBestModelHook(FrequencyHook):
     SAVE_PATH = 'model-best.pt'
 
-    def __init__(self, metric, data):
+    def __init__(self, metric, data, save_every_steps=None, save_every_epochs=None):
+        super().__init__(save_every_steps, save_every_epochs)
         self.metric = metric
         self.data = data
         self.best_acc = -float('Inf')
 
-    def on_end_epoch(self, engine):
+    def do_it(self, engine):
         engine.model.eval()
         metric = self.metric
         metric.reset()
@@ -256,20 +268,13 @@ class ApplyEMAHook(Hook):
                 left[:] = right
 
 
-class SaveModelHook(Hook):
-    def __init__(self, save_every_epochs=None, save_every_steps=None):
-        assert not (save_every_epochs and save_every_steps), 'Provide only one of them.'
-        self.save_every_epochs = save_every_epochs
-        self.save_every_steps = save_every_steps
+class SaveModelHook(FrequencyHook):
+    def __init__(self, save_every_steps=None, save_every_epochs=None):
+        super().__init__(save_every_steps, save_every_epochs)
 
-    def on_end_epoch(self, engine):
-        if self.save_every_epochs and engine.st['epoch'] % self.save_every_epochs == 0:
-            engine.save_model(engine.SAVE_PATH)
+    def do_it(self, g: Engine):
+        g.save_model(g.SAVE_PATH)
 
-    def on_end_batch(self, engine):
-        if self.save_every_steps and engine.st['step'] % self.save_every_steps == 0:
-            engine.save_model(engine.SAVE_PATH)
-
-    def on_end_train(self, engine):
+    def on_end_train(self, g):
         # remember to save the last checkpoint file
-        engine.save_model(engine.SAVE_PATH)
+        self.do_it(g)
