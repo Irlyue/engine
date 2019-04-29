@@ -11,7 +11,7 @@ class Logger:
 
 class TerminalFileLogger(Logger):
     def __init__(self, log_file='/tmp/log.txt'):
-        self.log_file = open(log_file, 'wa')
+        self.log_file = open(log_file, 'a')
         self.print('==> Logging start at %s' % datetime.now())
 
     def print(self, s):

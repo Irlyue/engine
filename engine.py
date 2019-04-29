@@ -1,22 +1,52 @@
 import os
-import log
 import json
 import torch
+import visdom
 import torch.nn as nn
 
 from tqdm import tqdm
+from . import logger
+
+
+TRAIN_LOG_FILE = 'train_log.txt'
+EVAL_LOG_FILE = 'eval_log.txt'
+LOGGER = None
+VIZ = None
+
+
+def setup_visdom(**kwargs):
+    global VIZ
+    try:
+        VIZ = visdom.Visdom(**kwargs)
+    except:
+        VIZ = None
+        log_print('==> Failed to set up visdom!')
+    else:
+        log_print('==> Successfully set up visdom!')
+
+
+def setup_logger(name):
+    global LOGGER
+    if LOGGER:
+        LOGGER.close()
+    folder = os.path.dirname(name)
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+    LOGGER = logger.TerminalFileLogger(name)
+    LOGGER.print(f'==> Successfully set up logging file `{name}`')
+
+
+def log_print(s):
+    LOGGER.print(s)
 
 
 class Engine:
     SAVE_PATH = 'model.pt'
-    TRAIN_LOG_FILE = 'train_log.txt'
-    EVAL_LOG_FILE = 'eval_log.txt'
 
     def __init__(self, model, config):
         self.model = model
         self.config = config
         self.multi_gpu_model = None
-        self.log = None
 
     def __call__(self, x):
         return self.model(x)
@@ -74,17 +104,16 @@ class Engine:
         }
         to_save.update(others)
         torch.save(to_save, path)
-        self.log.print('===> Model-%d saved at %s' % (to_save['step'], path))
+        log_print('===> Model-%d saved at %s' % (to_save['step'], path))
 
     def load_model(self, path):
         path = self.model_path(path)
         loaded = torch.load(path)
         self.model.load_state_dict(loaded.pop('state_dict'))
         self.st.update(loaded)
-        self.log.print('===> Model at %d step loaded!' % self.st['step'])
+        log_print('===> Model at %d step loaded!' % self.st['step'])
 
     def on_start_eval(self, **kwargs):
-        self.log = log.TerminalFileLogger(log_file=self.relative_path(self.EVAL_LOG_FILE))
         self.model.eval()
         self.model.to(self.config['device'])
         self.st = kwargs.copy()
@@ -95,14 +124,12 @@ class Engine:
             hook.on_start_eval(self)
 
     def on_end_eval(self):
-        self.log.print('***********************************')
+        log_print('***********************************')
         for metric in self.st['metrics']:
-            self.log.print(metric)
-        self.log.print('***********************************')
-        self.log.close()
+            log_print(metric)
+        log_print('***********************************')
 
     def on_start_train(self, **kwargs):
-        self.log = log.TerminalFileLogger(log_file=self.relative_path(self.TRAIN_LOG_FILE))
         self.model.train()
         self.st = {
             'epoch': 0,
@@ -115,7 +142,7 @@ class Engine:
 
         n_gpus = torch.cuda.device_count()
         if self.config['multi_gpus'] and n_gpus > 1:
-            self.log.print('==> Using %d GPUs...' % n_gpus)
+            log_print('==> Using %d GPUs...' % n_gpus)
             self.multi_gpu_model = nn.DataParallel(self.model)
             self.multi_gpu_model.to(self.config['device'])
         else:
@@ -125,21 +152,20 @@ class Engine:
             self.load_model(self.SAVE_PATH)
         if not os.path.exists(self.config['model_dir']):
             os.makedirs(self.config['model_dir'])
-        self.log.print('\n%s\n' % json.dumps(self.config, indent=2))
+        log_print('\n%s\n' % json.dumps(self.config, indent=2))
         for hook in self.st['hooks'] or []:
             hook.on_start_train(self)
 
     def model_path(self, path):
         return path if os.path.isabs(path) else os.path.join(self.config['model_dir'], path)
 
-    def relative_path(self, path):
+    def absolute_path(self, path):
         return path if os.path.isabs(path) else os.path.join(self.config['model_dir'], path)
 
     def on_end_train(self):
-        self.log.print('Loss at final step: %.4f' % self.st['loss'])
+        log_print('Loss at final step: %.4f' % self.st['loss'])
         for hook in self.st['hooks'] or []:
             hook.on_end_train(self)
-        self.log.close()
 
     def on_start_epoch(self):
         pass
@@ -197,37 +223,69 @@ class FrequencyHook(Hook):
             self.do_it(engine)
 
 
+class ScalarSummaryHook(FrequencyHook):
+    VIS_WIN_NAME = 'loss'
+
+    def __init__(self, summaries, summary_every_steps=None, summary_every_epochs=None):
+        super().__init__(summary_every_steps, summary_every_epochs)
+        self.summaries = summaries
+
+    def send_to_visdom(self, g):
+        if VIZ:
+            for summary in self.summaries:
+                y = [g.st[summary['y']]]
+                x = [g.st[summary['x']]]
+                VIZ.line(Y=y, X=x, win=summary['y'], update='append',
+                         opts={
+                             'xlabel': 'Step',
+                             'ylabel': summary['y'],
+                         })
+
+    def do_it(self, g: Engine):
+        self.send_to_visdom(g)
+
+
 class LoggingHook(FrequencyHook):
     def __init__(self, keys, print_every_steps=None, print_every_epochs=None):
         super().__init__(print_every_steps, print_every_epochs)
         self.keys = keys
 
-    def do_it(self, g):
-        g.log.print(', '.join('{}={}'.format(key, g.st[key]) for key in self.keys))
+    def do_it(self, g: Engine):
+        log_print(', '.join('{}={}'.format(key, g.st[key]) for key in self.keys))
 
 
 class SaveBestModelHook(FrequencyHook):
     SAVE_PATH = 'model-best.pt'
 
-    def __init__(self, metric, data, save_every_steps=None, save_every_epochs=None):
+    def __init__(self, metric, data, save_every_steps=None, save_every_epochs=1):
         super().__init__(save_every_steps, save_every_epochs)
         self.metric = metric
         self.data = data
         self.best_acc = -float('Inf')
 
-    def do_it(self, engine):
-        engine.model.eval()
+    def do_it(self, g: Engine):
+        g.model.eval()
         metric = self.metric
         metric.reset()
         with torch.no_grad():
             for inputs, labels in tqdm(self.data):
-                pred = engine.model(inputs)
+                pred = g.model(inputs)
                 metric(labels, pred)
         if self.best_acc < metric.result:
-            engine.log.print('===> Aha, %s' % self.metric)
+            log_print('===> Aha, %s' % self.metric)
             self.best_acc = metric.result
-            engine.save_model(self.SAVE_PATH)
-        engine.model.train()
+            g.save_model(self.SAVE_PATH)
+        self.send_to_visdom(g)
+        g.model.train()
+
+    def send_to_visdom(self, g: Engine):
+        if VIZ:
+            VIZ.line(Y=[self.metric.result], X=[g.st['step']], win=self.metric.name, update='append',
+                     opts={
+                         'title': self.metric.name,
+                         'xlabel': 'Step',
+                         'ylabel': self.metric.name
+                     })
 
 
 class ExponentialMovingAverageHook(Hook):
@@ -261,7 +319,7 @@ class ApplyEMAHook(Hook):
         self.params = params
 
     def on_start_eval(self, engine):
-        engine.log.print('==> Applying EMA weights')
+        log_print('==> Applying EMA weights')
         state = torch.load(engine.model_path(self.save_path))
         with torch.no_grad():
             for left, right in zip(self.params or engine.model.parameters(), state['ema']):
