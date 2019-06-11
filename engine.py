@@ -2,10 +2,12 @@ import os
 import json
 import torch
 import visdom
+import warnings
 import torch.nn as nn
 
 from tqdm import tqdm
 from . import logger
+from time import time
 
 
 TRAIN_LOG_FILE = 'train_log.txt'
@@ -14,10 +16,10 @@ LOGGER = None
 VIZ = None
 
 
-def setup_visdom(**kwargs):
+def setup_visdom(port=8097, env='engine', **kwargs):
     global VIZ
     try:
-        VIZ = visdom.Visdom(**kwargs)
+        VIZ = visdom.Visdom(port=port, env=env, **kwargs)
     except:
         VIZ = None
         log_print('==> Failed to set up visdom!')
@@ -91,7 +93,10 @@ class Engine:
         self.model.eval()
         self.model.to(self.config['device'])
         self.st = {}
-        self.load_model(model_path)
+        if model_path:
+            self.load_model(model_path)
+        else:
+            warnings.warn('Not loading any checkpoint file! Could be an error!')
         for hook in hooks or []:
             hook.on_start_eval(self)
 
@@ -237,7 +242,7 @@ class ScalarSummaryHook(FrequencyHook):
                 x = [g.st[summary['x']]]
                 VIZ.line(Y=y, X=x, win=summary['y'], update='append',
                          opts={
-                             'xlabel': 'Step',
+                             'xlabel': summary['x'],
                              'ylabel': summary['y'],
                          })
 
@@ -249,9 +254,17 @@ class LoggingHook(FrequencyHook):
     def __init__(self, keys, print_every_steps=None, print_every_epochs=None):
         super().__init__(print_every_steps, print_every_epochs)
         self.keys = keys
+        self.tic = -1
 
     def do_it(self, g: Engine):
-        log_print(', '.join('{}={}'.format(key, g.st[key]) for key in self.keys))
+        toc = time()
+        if self.tic == -1:
+            log_print(', '.join('{}={}'.format(key, g.st[key]) for key in self.keys))
+        else:
+            elapsed = toc - self.tic
+            info = ', '.join('{}={}'.format(key, g.st[key]) for key in self.keys)
+            log_print('{} [{:1.f} seconds]'.format(info, elapsed))
+        self.tic = toc
 
 
 class SaveBestModelHook(FrequencyHook):
