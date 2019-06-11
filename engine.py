@@ -254,16 +254,13 @@ class LoggingHook(FrequencyHook):
     def __init__(self, keys, print_every_steps=None, print_every_epochs=None):
         super().__init__(print_every_steps, print_every_epochs)
         self.keys = keys
-        self.tic = -1
+        self.tic = time()
 
     def do_it(self, g: Engine):
         toc = time()
-        if self.tic == -1:
-            log_print(', '.join('{}={}'.format(key, g.st[key]) for key in self.keys))
-        else:
-            elapsed = toc - self.tic
-            info = ', '.join('{}={}'.format(key, g.st[key]) for key in self.keys)
-            log_print('{} [{:1.f} seconds]'.format(info, elapsed))
+        elapsed = toc - self.tic
+        info = ', '.join('{}={}'.format(key, g.st[key]) for key in self.keys)
+        log_print('{} [{:.1f} seconds]'.format(info, elapsed))
         self.tic = toc
 
 
