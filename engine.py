@@ -51,7 +51,7 @@ class Engine:
         self.multi_gpu_model = None
 
     def __call__(self, x):
-        return self.model(x)
+        return self.multi_gpu_model(x) if self.multi_gpu_model else self.model(x)
 
     def train(self, data, optimizer, loss_fn, hooks=None, progress_bar=True):
         """
@@ -71,7 +71,7 @@ class Engine:
             for self.st['step'], (inputs, labels) in enumerate(data, start=self.st['step']):
                 self.on_start_batch(inputs=inputs, labels=labels)
                 optimizer.zero_grad()
-                logits = self.multi_gpu_model(inputs) if self.multi_gpu_model else self.model(inputs)
+                logits = self(inputs)
                 loss = loss_fn(logits, labels)
                 self.st['loss'] = loss.item()
                 loss.backward()
@@ -90,8 +90,8 @@ class Engine:
             self.on_end_eval()
 
     def on_start_predict(self, hooks=None, model_path='model-best.pt'):
+        self.on_start()
         self.model.eval()
-        self.model.to(self.config['device'])
         self.st = {}
         if model_path:
             self.load_model(model_path)
@@ -134,7 +134,17 @@ class Engine:
             log_print(metric)
         log_print('***********************************')
 
+    def on_start(self):
+        n_gpus = torch.cuda.device_count()
+        if self.config['multi_gpus'] and n_gpus > 1:
+            log_print('==> Using %d GPUs...' % n_gpus)
+            self.multi_gpu_model = nn.DataParallel(self.model)
+            self.multi_gpu_model.to(self.config['device'])
+        else:
+            self.model.to(self.config['device'])
+
     def on_start_train(self, **kwargs):
+        self.on_start()
         self.model.train()
         self.st = {
             'epoch': 0,
@@ -144,14 +154,6 @@ class Engine:
             'loss': 0.0
         }
         self.st.update(kwargs)
-
-        n_gpus = torch.cuda.device_count()
-        if self.config['multi_gpus'] and n_gpus > 1:
-            log_print('==> Using %d GPUs...' % n_gpus)
-            self.multi_gpu_model = nn.DataParallel(self.model)
-            self.multi_gpu_model.to(self.config['device'])
-        else:
-            self.model.to(self.config['device'])
 
         if os.path.exists(self.model_path(self.SAVE_PATH)):
             self.load_model(self.SAVE_PATH)
@@ -237,13 +239,13 @@ class ScalarSummaryHook(FrequencyHook):
 
     def send_to_visdom(self, g):
         if VIZ:
-            for summary in self.summaries:
-                y = [g.st[summary['y']]]
-                x = [g.st[summary['x']]]
-                VIZ.line(Y=y, X=x, win=summary['y'], update='append',
+            for xname, yname in self.summaries:
+                x = [g.st[xname]]
+                y = [g.st[yname]]
+                VIZ.line(Y=y, X=x, win=yname, update='append',
                          opts={
-                             'xlabel': summary['x'],
-                             'ylabel': summary['y'],
+                             'xlabel': xname,
+                             'ylabel': yname,
                          })
 
     def do_it(self, g: Engine):
@@ -279,7 +281,7 @@ class SaveBestModelHook(FrequencyHook):
         metric.reset()
         with torch.no_grad():
             for inputs, labels in tqdm(self.data):
-                pred = g.model(inputs)
+                pred = g(inputs)
                 metric(labels, pred)
         if self.best_acc < metric.result:
             log_print('===> Aha, %s' % self.metric)
