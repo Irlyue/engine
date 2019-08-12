@@ -290,6 +290,9 @@ class SaveBestModelHook(FrequencyHook):
         self.send_to_visdom(g)
         g.model.train()
 
+    def on_end_train(self, g: Engine):
+        self.do_it(g)
+
     def send_to_visdom(self, g: Engine):
         if VIZ:
             VIZ.line(Y=[self.metric.result], X=[g.st['step']], win=self.metric.name, update='append',
